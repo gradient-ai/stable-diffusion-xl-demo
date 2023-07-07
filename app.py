@@ -7,8 +7,12 @@ import base64
 from io import BytesIO
 import os
 import gc
-
+from diffusers import StableDiffusionControlNetPipeline, ControlNetModel
 from share_btn import community_icon_html, loading_icon_html, share_js
+from diffusers.utils import load_image
+import cv2
+from PIL import Image
+import numpy as np
 
 # SDXL code: https://github.com/huggingface/diffusers/pull/3859
 
@@ -17,8 +21,8 @@ access_token = os.getenv("ACCESS_TOKEN")
 
 if model_dir:
     # Use local model
-    model_key_base = os.path.join(model_dir, "stable-diffusion-xl-base-0.9")
-    model_key_refiner = os.path.join(model_dir, "stable-diffusion-xl-refiner-0.9")
+    model_key_base = "/notebooks/SDXL/stable-diffusion-xl-base-0.9"
+    model_key_refiner = "/notebooks/SDXL/stable-diffusion-xl-refiner-0.9"
 else:
     model_key_base = "stabilityai/stable-diffusion-xl-base-0.9"
     model_key_refiner = "stabilityai/stable-diffusion-xl-refiner-0.9"
@@ -39,7 +43,6 @@ pipe.enable_model_cpu_offload()
 
 # if using torch < 2.0
 # pipe.enable_xformers_memory_efficient_attention()
-
 # pipe.unet = torch.compile(pipe.unet, mode="reduce-overhead", fullgraph=True)
 
 if enable_refiner:
@@ -54,12 +57,28 @@ if enable_refiner:
     # pipe_refiner.unet = torch.compile(pipe_refiner.unet, mode="reduce-overhead", fullgraph=True)
 
 # NOTE: we do not have word list filtering in this gradio demo
-
+# [prompt, negative, guidance_scale, height, width, seed, samples, steps, refiner_steps]
 is_gpu_busy = False
-def infer(prompt, negative, scale, samples=4, steps=50, refiner_strength=0.3):
-    prompt, negative = [prompt] * samples, [negative] * samples
-    images = pipe(prompt=prompt, negative_prompt=negative, guidance_scale=scale, num_inference_steps=steps).images
+def infer(prompt, negative, guidance_scale, height, width, seed, samples, steps, refiner_steps):#, control, net, image):
+    torch.manual_seed(seed)
+    # control_models = {"Canny": "lllyasviel/sd-controlnet-canny", "LineArt": "lllyasviel/control_v11p_sd15_lineart", "Normal": "lllyasviel/sd-controlnet-normal", "NormalBae": "lllyasviel/control_v11p_sd15_normalbae", "OpenPose":"lllyasviel/control_v11p_sd15_openpose"}
+#     if control:
+#         image = np.array(image)
 
+#         low_threshold = 100
+#         high_threshold = 200
+
+#         image = cv2.Canny(image, low_threshold, high_threshold)
+#         image = image[:, :, None]
+#         image = np.concatenate([image, image, image], axis=2)
+#         ex_image = Image.fromarray(image)
+#         controlnet = ControlNetModel.from_pretrained(control_models[net])
+#         pipe = StableDiffusionControlNetPipeline.from_pretrained(model_key_base, controlnet=controlnet, use_auth_token=access_token)
+#         prompt, negative = [prompt] * samples, [negative] * samples
+#         images = pipe(prompt=prompt, negative_prompt=negative, guidance_scale=guidance_scale, num_inference_steps=steps, height = height, width = width, image = ex_image).images
+#     else:
+    prompt, negative = [prompt] * samples, [negative] * samples
+    images = pipe(prompt=prompt, negative_prompt=negative, guidance_scale=guidance_scale, num_inference_steps=steps, height = height, width = width).images
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -75,7 +94,7 @@ def infer(prompt, negative, scale, samples=4, steps=50, refiner_strength=0.3):
                 image_b64 = (f"data:image/jpeg;base64,{img_str}")
                 images_b64_list.append(image_b64)
 
-        images = pipe_refiner(prompt=prompt, negative_prompt=negative, image=images, num_inference_steps=steps, strength=refiner_strength).images
+        images = pipe_refiner(prompt=prompt, negative_prompt=negative, image=images, num_inference_steps=refiner_steps).images
 
         gc.collect()
         torch.cuda.empty_cache()
@@ -89,7 +108,7 @@ def infer(prompt, negative, scale, samples=4, steps=50, refiner_strength=0.3):
         images_b64_list.append(image_b64)
     
     return images_b64_list
-    
+
     
 css = """
         .gradio-container {
@@ -314,7 +333,7 @@ with block:
         with gr.Box():
             with gr.Row(elem_id="prompt-container").style(mobile_collapse=False, equal_height=True):
                 with gr.Column():
-                    text = gr.Textbox(
+                    prompt = gr.Textbox(
                         label="Enter your prompt",
                         show_label=False,
                         max_lines=1,
@@ -354,30 +373,36 @@ with block:
                 share_button = gr.Button("Share to community", elem_id="share-btn")
 
         with gr.Accordion("Advanced settings", open=False):
+            guidance_scale = gr.Slider(
+                    label="Guidance Scale", minimum=0, maximum=50, value=9, step=0.1
+                )
         #    gr.Markdown("Advanced settings are temporarily unavailable")
+            height = gr.Slider(label = "Image height", minimum = 512, maximum = 2048, step = 8, value = 512, interactive = True)
+            width = gr.Slider(label = "Image width", minimum = 512, maximum = 2048, step = 8, value = 512, interactive = True)
+            seed = gr.Slider(
+               label="Seed",
+               minimum=0,
+               maximum=999999999,
+               step=1,
+               randomize=True)
             samples = gr.Slider(label="Images", minimum=1, maximum=4, value=4, step=1)
             steps = gr.Slider(label="Steps", minimum=1, maximum=250, value=50, step=1)
             if enable_refiner:
-                refiner_strength = gr.Slider(label="Refiner Strength", minimum=0, maximum=1.0, value=0.3, step=0.1)
+                refiner_steps = gr.Slider(label="Refiner Steps", minimum=1, maximum=50, value=15, step=1)
             else:
-                refiner_strength = gr.Slider(label="Refiner Strength (refiner not enabled)", minimum=0, maximum=0, value=0, step=0)
-            guidance_scale = gr.Slider(
-                label="Guidance Scale", minimum=0, maximum=50, value=9, step=0.1
-            )
-        #    seed = gr.Slider(
-        #        label="Seed",
-        #        minimum=0,
-        #        maximum=2147483647,
-        #        step=1,
-        #        randomize=True,
-        #    )
+                refiner_steps = gr.Slider(label="Refiner Steps (refiner not enabled)", minimum=0, maximum=0, value=0, step=1)
+            # control = gr.Checkbox(label = 'Use ControlNet')
+            # net = gr.Radio(choices = ['Canny', 'Normal', 'NormalBae', 'OpenPose', 'LineArt'], value = 'Canny', label = "Type of ControlNet Model")
+            # image = gr.Image(interactive = True)
 
-        ex = gr.Examples(examples=examples, fn=infer, inputs=[text, negative, guidance_scale], outputs=[gallery, community_icon, loading_icon, share_button], cache_examples=False)
+
+
+        ex = gr.Examples(examples=examples, fn=infer, inputs=[prompt, negative, guidance_scale, height, width, seed, samples, steps, refiner_steps], outputs=[gallery, community_icon, loading_icon, share_button], cache_examples=False)
         ex.dataset.headers = [""]
-        negative.submit(infer, inputs=[text, negative, guidance_scale, samples, steps, refiner_strength], outputs=[gallery], postprocess=False)
-        text.submit(infer, inputs=[text, negative, guidance_scale, samples, steps, refiner_strength], outputs=[gallery], postprocess=False)
-        btn.click(infer, inputs=[text, negative, guidance_scale, samples, steps, refiner_strength], outputs=[gallery], postprocess=False)
-        
+        negative.submit(infer, inputs=[prompt, negative, guidance_scale, height, width, seed, samples, steps, refiner_steps], outputs=[gallery], postprocess=False)
+        prompt.submit(infer, inputs=[prompt, negative, guidance_scale, height, width, seed, samples, steps, refiner_steps], outputs=[gallery], postprocess=False)
+        btn.click(infer, inputs=[prompt, negative, guidance_scale, height, width, seed, samples, steps, refiner_steps], outputs=[gallery], postprocess=False)
+
         #advanced_button.click(
         #    None,
         #    [],
@@ -408,9 +433,10 @@ with block:
                     <p><h4>LICENSE</h4>
 The model is licensed with a <a href="https://huggingface.co/stabilityai/stable-diffusion-2/blob/main/LICENSE-MODEL" style="text-decoration: underline;" target="_blank">CreativeML OpenRAIL++</a> license. The authors claim no rights on the outputs you generate, you are free to use them and are accountable for their use which must not go against the provisions set in this license. The license forbids you from sharing any content that violates any laws, produce any harm to a person, disseminate any personal information that would be meant for harm, spread misinformation and target vulnerable groups. For the full list of restrictions please <a href="https://huggingface.co/spaces/CompVis/stable-diffusion-license" target="_blank" style="text-decoration: underline;" target="_blank">read the license</a></p>
                     <p><h4>Biases and content acknowledgment</h4>
-Despite how impressive being able to turn text into image is, beware to the fact that this model may output content that reinforces or exacerbates societal biases, as well as realistic faces, pornography and violence. The model was trained on the <a href="https://laion.ai/blog/laion-5b/" style="text-decoration: underline;" target="_blank">LAION-5B dataset</a>, which scraped non-curated image-text-pairs from the internet (the exception being the removal of illegal content) and is meant for research purposes. You can read more in the <a href="https://huggingface.co/CompVis/stable-diffusion-v1-4" style="text-decoration: underline;" target="_blank">model card</a></p>
+Despite how impressive being able to turn finto image is, beware to the fact that this model may output content that reinforces or exacerbates societal biases, as well as realistic faces, pornography and violence. The model was trained on the <a href="https://laion.ai/blog/laion-5b/" style="text-decoration: underline;" target="_blank">LAION-5B dataset</a>, which scraped non-curated image-text-pairs from the internet (the exception being the removal of illegal content) and is meant for research purposes. You can read more in the <a href="https://huggingface.co/CompVis/stable-diffusion-v1-4" style="text-decoration: underline;" target="_blank">model card</a></p>
                </div>
                 """
             )
+    
 
-block.queue().launch(share=share)
+block.queue().launch(share=True)
